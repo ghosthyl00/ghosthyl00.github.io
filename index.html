@@ -32,14 +32,16 @@
         .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
         button { border: none; padding: 12px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; }
         button:active { transform: scale(0.98); }
-        .btn-main { background: var(--danger); color: white; width: 100%; grid-column: span 2; }
+        
+        /* Кнопка старта/стопа */
+        .btn-main { background: var(--success); color: white; width: 100%; grid-column: span 2; }
+        .btn-main.active { background: var(--danger); }
+        
         .btn-break { background: var(--warning); color: white; }
         .btn-exit { background: var(--gray); color: white; }
 
         .section-title { font-size: 14px; font-weight: bold; margin-bottom: 10px; display: flex; align-items: center; gap: 5px; }
         .user-list { display: flex; flex-direction: column; gap: 8px; }
-        
-        /* Стили списка как на макете */
         .user-item { 
             display: flex; justify-content: space-between; align-items: center; 
             padding: 12px; border-radius: 12px; background: #fff; border: 1px solid #eee;
@@ -70,7 +72,7 @@
                 <span>⏱️</span> <span id="stopwatch">00:00:00</span>
             </div>
             <div class="btn-grid">
-                <button class="btn-main" onclick="startSession()">🚀 Начать сессию</button>
+                <button id="session-btn" class="btn-main" onclick="handleSession()">🚀 Начать сессию</button>
                 <button class="btn-break" onclick="togglePause()">☕ Перерыв</button>
                 <button class="btn-exit" onclick="logout()">Выход</button>
             </div>
@@ -104,6 +106,7 @@
     let seconds = 0;
     let timerInterval = null;
     let isPaused = false;
+    let isSessionActive = false;
 
     async function init() {
         const { data: { session } } = await supabase.auth.getSession();
@@ -124,31 +127,54 @@
         fetchInitialData();
         trackPresence();
         
-        // Каждую секунду обновляем отображение таймеров в списке
+        // Каждую секунду обновляем таймеры в списке участников
         setInterval(renderUserList, 1000);
     }
 
-    // --- Логика Таймера ---
-    window.startSession = async () => {
-        seconds = 0;
-        isPaused = false;
-        const startTime = new Date().toISOString();
+    // --- УПРАВЛЕНИЕ СЕССИЕЙ (Исправлено) ---
+    window.handleSession = async () => {
+        const btn = document.getElementById('session-btn');
         
-        // Сохраняем в базу "profiles." (с точкой!)
-        await supabase.from('profiles.').upsert({
-            id: user.id,
-            username: user.user_metadata.full_name || user.email,
-            status: 'Учится',
-            started_at: startTime
-        });
+        if (!isSessionActive) {
+            // СТАРТ
+            isSessionActive = true;
+            isPaused = false;
+            seconds = 0;
+            const startTime = new Date().toISOString();
+            
+            btn.innerText = "🛑 Завершить сессию";
+            btn.classList.add('active');
 
-        if (timerInterval) clearInterval(timerInterval);
-        timerInterval = setInterval(() => {
-            if (!isPaused) {
-                seconds++;
-                updateTimerDisplay();
-            }
-        }, 1000);
+            // Сохраняем в profiles. (с точкой!)
+            await supabase.from('profiles.').upsert({
+                id: user.id,
+                username: user.user_metadata.full_name || user.email,
+                status: 'Учится',
+                started_at: startTime
+            });
+
+            if (timerInterval) clearInterval(timerInterval);
+            timerInterval = setInterval(() => {
+                if (!isPaused) {
+                    seconds++;
+                    updateTimerDisplay();
+                }
+            }, 1000);
+        } else {
+            // СТОП
+            isSessionActive = false;
+            clearInterval(timerInterval);
+            btn.innerText = "🚀 Начать сессию";
+            btn.classList.remove('active');
+            
+            await supabase.from('profiles.').update({ 
+                status: 'Завершил',
+                started_at: null 
+            }).eq('id', user.id);
+            
+            seconds = 0;
+            updateTimerDisplay();
+        }
     };
 
     function updateTimerDisplay() {
@@ -159,13 +185,14 @@
     }
 
     window.togglePause = () => {
+        if (!isSessionActive) return;
         isPaused = !isPaused;
         const btn = document.querySelector('.btn-break');
         btn.innerText = isPaused ? '▶️ Продолжить' : '☕ Перерыв';
         btn.style.background = isPaused ? '#2ecc71' : '#f1c40f';
     };
 
-    // --- Монитор Группы ---
+    // --- МОНИТОР ГРУППЫ (Исправлено) ---
     async function fetchInitialData() {
         const { data } = await supabase.from('profiles.').select('*');
         profiles = data || [];
@@ -174,10 +201,11 @@
     }
 
     function setupRealtime() {
-        supabase.channel('any')
+        supabase.channel('custom-all-channel')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles.' }, payload => {
-                if (payload.eventType === 'INSERT') profiles.push(payload.new);
-                else if (payload.eventType === 'UPDATE') {
+                if (payload.eventType === 'INSERT') {
+                    profiles.push(payload.new);
+                } else if (payload.eventType === 'UPDATE') {
                     profiles = profiles.map(p => p.id === payload.new.id ? payload.new : p);
                 }
                 renderUserList();
@@ -203,7 +231,7 @@
         container.innerHTML = profiles.map(p => {
             const isOnline = (window.currentOnlineUsers || []).includes(p.id);
             
-            // Вычисляем время в учебе на лету
+            // Расчет времени сессии для каждого участника
             let timeStr = "0ч 0м 0с";
             if (p.started_at) {
                 const diff = Math.floor((new Date() - new Date(p.started_at)) / 1000);
@@ -228,7 +256,7 @@
         }).join('');
     }
 
-    // --- Чат ---
+    // --- ЧАТ ---
     async function fetchChat() {
         const { data } = await supabase.from('messages').select('*').order('created_at', { ascending: true }).limit(30);
         if (data) data.forEach(addMessageToUI);
