@@ -23,15 +23,12 @@
         }
 
         .app-container { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 15px; }
-
         .card { background: var(--card); padding: 20px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
 
-        /* User Header */
         .user-card { text-align: center; }
         .user-name { font-weight: bold; font-size: 18px; margin-bottom: 10px; display: block; }
         .timer-display { font-size: 28px; font-weight: bold; color: var(--primary); margin: 15px 0; display: flex; align-items: center; justify-content: center; gap: 10px; }
         
-        /* Buttons */
         .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
         button { border: none; padding: 12px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; }
         button:active { transform: scale(0.98); }
@@ -39,14 +36,17 @@
         .btn-break { background: var(--warning); color: white; }
         .btn-exit { background: var(--gray); color: white; }
 
-        /* Group Monitor */
         .section-title { font-size: 14px; font-weight: bold; margin-bottom: 10px; display: flex; align-items: center; gap: 5px; }
         .user-list { display: flex; flex-direction: column; gap: 8px; }
-        .user-item { display: flex; justify-content: space-between; align-items: center; padding: 8px; border-radius: 8px; background: #fafafa; }
+        
+        /* Стили списка как на макете */
+        .user-item { 
+            display: flex; justify-content: space-between; align-items: center; 
+            padding: 12px; border-radius: 12px; background: #fff; border: 1px solid #eee;
+        }
         .online-dot { width: 10px; height: 10px; border-radius: 50%; background: #ccc; display: inline-block; margin-right: 8px; }
         .online-dot.active { background: var(--success); box-shadow: 0 0 5px var(--success); }
 
-        /* Chat */
         .chat-box { height: 150px; overflow-y: auto; border: 1px solid #eee; border-radius: 8px; padding: 10px; font-size: 13px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 5px; }
         .chat-input-group { display: flex; gap: 5px; }
         input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 8px; }
@@ -70,7 +70,7 @@
                 <span>⏱️</span> <span id="stopwatch">00:00:00</span>
             </div>
             <div class="btn-grid">
-                <button class="btn-main" onclick="stopSession()">🛑 Завершить сессию</button>
+                <button class="btn-main" onclick="startSession()">🚀 Начать сессию</button>
                 <button class="btn-break" onclick="togglePause()">☕ Перерыв</button>
                 <button class="btn-exit" onclick="logout()">Выход</button>
             </div>
@@ -78,8 +78,7 @@
 
         <div class="card">
             <div class="section-title">👥 Монитор группы</div>
-            <div id="group-list" class="user-list">
-                </div>
+            <div id="group-list" class="user-list"></div>
         </div>
 
         <div class="card">
@@ -101,11 +100,11 @@
     const supabase = createClient(URL, KEY);
 
     let user = null;
+    let profiles = [];
     let seconds = 0;
     let timerInterval = null;
     let isPaused = false;
 
-    // --- Инициализация ---
     async function init() {
         const { data: { session } } = await supabase.auth.getSession();
         if (session) {
@@ -121,21 +120,36 @@
         document.getElementById('app-section').classList.remove('hidden');
         document.getElementById('display-name').innerText = user.user_metadata.full_name || user.email;
         
-        startTimer();
         setupRealtime();
         fetchInitialData();
         trackPresence();
+        
+        // Каждую секунду обновляем отображение таймеров в списке
+        setInterval(renderUserList, 1000);
     }
 
     // --- Логика Таймера ---
-    function startTimer() {
+    window.startSession = async () => {
+        seconds = 0;
+        isPaused = false;
+        const startTime = new Date().toISOString();
+        
+        // Сохраняем в базу "profiles." (с точкой!)
+        await supabase.from('profiles.').upsert({
+            id: user.id,
+            username: user.user_metadata.full_name || user.email,
+            status: 'Учится',
+            started_at: startTime
+        });
+
+        if (timerInterval) clearInterval(timerInterval);
         timerInterval = setInterval(() => {
             if (!isPaused) {
                 seconds++;
                 updateTimerDisplay();
             }
         }, 1000);
-    }
+    };
 
     function updateTimerDisplay() {
         const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
@@ -151,77 +165,64 @@
         btn.style.background = isPaused ? '#2ecc71' : '#f1c40f';
     };
 
-    window.stopSession = () => {
-        seconds = 0;
-        updateTimerDisplay();
-        alert("Сессия завершена!");
-    };
-
-    // --- Presence (Кто онлайн) ---
-    function trackPresence() {
-        const channel = supabase.channel('online-users');
-        channel
-            .on('presence', { event: 'sync' }, () => {
-                const state = channel.presenceState();
-                updateOnlineUI(state);
-            })
-            .subscribe(async (status) => {
-                if (status === 'SUBSCRIBED') {
-                    await channel.track({
-                        user_id: user.id,
-                        online_at: new Date().toISOString(),
-                    });
-                }
-            });
-    }
-
-    function updateOnlineUI(presenceState) {
-        const onlineIds = Object.values(presenceState).flat().map(i => i.user_id);
-        // Мы будем использовать эти ID при рендере списка групп
-        window.currentOnlineUsers = onlineIds;
-        renderUserList(); 
-    }
-
-    // --- Realtime & База данных ---
-    let profiles = [];
+    // --- Монитор Группы ---
     async function fetchInitialData() {
-        const { data } = await supabase.from('profiles').select('*');
+        const { data } = await supabase.from('profiles.').select('*');
         profiles = data || [];
         renderUserList();
         fetchChat();
     }
 
     function setupRealtime() {
-        // Подписка на изменения в профилях (статусы)
-        supabase.channel('schema-db-changes')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, payload => {
+        supabase.channel('any')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles.' }, payload => {
                 if (payload.eventType === 'INSERT') profiles.push(payload.new);
-                if (payload.eventType === 'UPDATE') {
+                else if (payload.eventType === 'UPDATE') {
                     profiles = profiles.map(p => p.id === payload.new.id ? payload.new : p);
                 }
                 renderUserList();
             })
-            .subscribe();
-
-        // Подписка на новые сообщения в чате
-        supabase.channel('chat-room')
             .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, payload => {
                 addMessageToUI(payload.new);
             })
             .subscribe();
     }
 
+    function trackPresence() {
+        const channel = supabase.channel('online-users');
+        channel.on('presence', { event: 'sync' }, () => {
+            window.currentOnlineUsers = Object.values(channel.presenceState()).flat().map(i => i.user_id);
+            renderUserList();
+        }).subscribe(async (status) => {
+            if (status === 'SUBSCRIBED') await channel.track({ user_id: user.id });
+        });
+    }
+
     function renderUserList() {
         const container = document.getElementById('group-list');
         container.innerHTML = profiles.map(p => {
             const isOnline = (window.currentOnlineUsers || []).includes(p.id);
+            
+            // Вычисляем время в учебе на лету
+            let timeStr = "0ч 0м 0с";
+            if (p.started_at) {
+                const diff = Math.floor((new Date() - new Date(p.started_at)) / 1000);
+                const h = Math.floor(diff / 3600);
+                const m = Math.floor((diff % 3600) / 60);
+                const s = diff % 60;
+                timeStr = `${h}ч ${m}м ${s}с`;
+            }
+
             return `
                 <div class="user-item">
                     <div>
                         <span class="online-dot ${isOnline ? 'active' : ''}"></span>
-                        <strong>${p.username}</strong>
+                        <strong>${p.username || 'Участник'}</strong>
                     </div>
-                    <small style="color: #888;">Дома</small>
+                    <div style="text-align: right;">
+                        <div style="font-size: 11px; color: #666;">🏠 Дома</div>
+                        <div style="font-size: 11px; color: var(--primary); font-weight: bold;">⏱️ ${timeStr}</div>
+                    </div>
                 </div>
             `;
         }).join('');
@@ -229,19 +230,17 @@
 
     // --- Чат ---
     async function fetchChat() {
-        const { data } = await supabase.from('messages').select('*').order('created_at', { ascending: true }).limit(20);
+        const { data } = await supabase.from('messages').select('*').order('created_at', { ascending: true }).limit(30);
         if (data) data.forEach(addMessageToUI);
     }
 
     window.sendMessage = async () => {
         const input = document.getElementById('chat-input');
-        const text = input.value.trim();
-        if (!text) return;
-
+        if (!input.value.trim()) return;
         await supabase.from('messages').insert({
             user_id: user.id,
             user_name: user.user_metadata.full_name || user.email,
-            content: text
+            content: input.value.trim()
         });
         input.value = '';
     };
@@ -249,13 +248,12 @@
     function addMessageToUI(msg) {
         const box = document.getElementById('chat-messages');
         const div = document.createElement('div');
+        div.style.marginBottom = "5px";
         div.innerHTML = `<strong>${msg.user_name}:</strong> ${msg.content}`;
         box.appendChild(div);
         box.scrollTop = box.scrollHeight;
     }
 
-    // --- Auth ---
-    document.getElementById('btn-login').onclick = () => supabase.auth.signInWithOAuth({ provider: 'google' });
     window.logout = () => { supabase.auth.signOut(); location.reload(); };
 
     init();
