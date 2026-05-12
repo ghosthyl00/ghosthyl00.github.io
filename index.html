@@ -35,7 +35,7 @@
         
         /* Кнопка старта/стопа */
         .btn-main { background: var(--success); color: white; width: 100%; grid-column: span 2; }
-        .btn-main.active { background: var(--danger); }
+        .btn-main.active { background: var(--danger) !important; }
         
         .btn-break { background: var(--warning); color: white; }
         .btn-exit { background: var(--gray); color: white; }
@@ -108,6 +108,7 @@
     let isPaused = false;
     let isSessionActive = false;
 
+    // Инициализация
     async function init() {
         const { data: { session } } = await supabase.auth.getSession();
         if (session) {
@@ -127,16 +128,14 @@
         fetchInitialData();
         trackPresence();
         
-        // Каждую секунду обновляем таймеры в списке участников
         setInterval(renderUserList, 1000);
     }
 
-    // --- УПРАВЛЕНИЕ СЕССИЕЙ (Исправлено) ---
+    // ЛОГИКА СЕССИИ (Исправлено переключение кнопки)
     window.handleSession = async () => {
         const btn = document.getElementById('session-btn');
         
         if (!isSessionActive) {
-            // СТАРТ
             isSessionActive = true;
             isPaused = false;
             seconds = 0;
@@ -145,7 +144,6 @@
             btn.innerText = "🛑 Завершить сессию";
             btn.classList.add('active');
 
-            // Сохраняем в profiles. (с точкой!)
             await supabase.from('profiles.').upsert({
                 id: user.id,
                 username: user.user_metadata.full_name || user.email,
@@ -161,14 +159,13 @@
                 }
             }, 1000);
         } else {
-            // СТОП
             isSessionActive = false;
             clearInterval(timerInterval);
             btn.innerText = "🚀 Начать сессию";
             btn.classList.remove('active');
             
             await supabase.from('profiles.').update({ 
-                status: 'Завершил',
+                status: 'Дома',
                 started_at: null 
             }).eq('id', user.id);
             
@@ -192,7 +189,7 @@
         btn.style.background = isPaused ? '#2ecc71' : '#f1c40f';
     };
 
-    // --- МОНИТОР ГРУППЫ (Исправлено) ---
+    // МОНИТОР ГРУППЫ (Исправлено отображение имен из Google)
     async function fetchInitialData() {
         const { data } = await supabase.from('profiles.').select('*');
         profiles = data || [];
@@ -201,7 +198,7 @@
     }
 
     function setupRealtime() {
-        supabase.channel('custom-all-channel')
+        supabase.channel('db-changes')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles.' }, payload => {
                 if (payload.eventType === 'INSERT') {
                     profiles.push(payload.new);
@@ -230,8 +227,6 @@
         const container = document.getElementById('group-list');
         container.innerHTML = profiles.map(p => {
             const isOnline = (window.currentOnlineUsers || []).includes(p.id);
-            
-            // Расчет времени сессии для каждого участника
             let timeStr = "0ч 0м 0с";
             if (p.started_at) {
                 const diff = Math.floor((new Date() - new Date(p.started_at)) / 1000);
@@ -248,7 +243,7 @@
                         <strong>${p.username || 'Участник'}</strong>
                     </div>
                     <div style="text-align: right;">
-                        <div style="font-size: 11px; color: #666;">🏠 Дома</div>
+                        <div style="font-size: 11px; color: #666;">🏠 ${p.status || 'Дома'}</div>
                         <div style="font-size: 11px; color: var(--primary); font-weight: bold;">⏱️ ${timeStr}</div>
                     </div>
                 </div>
@@ -256,7 +251,7 @@
         }).join('');
     }
 
-    // --- ЧАТ ---
+    // ЧАТ
     async function fetchChat() {
         const { data } = await supabase.from('messages').select('*').order('created_at', { ascending: true }).limit(30);
         if (data) data.forEach(addMessageToUI);
@@ -276,13 +271,19 @@
     function addMessageToUI(msg) {
         const box = document.getElementById('chat-messages');
         const div = document.createElement('div');
-        div.style.marginBottom = "5px";
         div.innerHTML = `<strong>${msg.user_name}:</strong> ${msg.content}`;
         box.appendChild(div);
         box.scrollTop = box.scrollHeight;
     }
 
-    window.logout = () => { supabase.auth.signOut(); location.reload(); };
+    // КНОПКА ВЫХОДА (Исправлено)
+    window.logout = async () => {
+        await supabase.auth.signOut();
+        localStorage.clear();
+        location.reload();
+    };
+
+    document.getElementById('btn-login').onclick = () => supabase.auth.signInWithOAuth({ provider: 'google' });
 
     init();
 </script>
